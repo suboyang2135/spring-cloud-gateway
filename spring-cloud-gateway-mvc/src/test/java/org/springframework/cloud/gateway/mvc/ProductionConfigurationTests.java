@@ -55,7 +55,8 @@ import org.springframework.web.util.UriComponentsBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @RunWith(SpringRunner.class)
-@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
+@SpringBootTest(properties = { "spring.cloud.gateway.proxy.auto-forward=baz" },
+		webEnvironment = WebEnvironment.RANDOM_PORT)
 @ContextConfiguration(classes = TestApplication.class)
 public class ProductionConfigurationTests {
 
@@ -110,7 +111,7 @@ public class ProductionConfigurationTests {
 	@Test
 	public void post() throws Exception {
 		assertThat(rest.postForObject("/proxy/0", Collections.singletonMap("name", "foo"),
-				Bar.class).getName()).isEqualTo("host=localhost;foo");
+				Bar.class).getName()).isEqualTo("host=localhost:" + port + ";foo");
 	}
 
 	@Test
@@ -190,13 +191,14 @@ public class ProductionConfigurationTests {
 						.body(Collections
 								.singletonList(Collections.singletonMap("name", "foo"))),
 				new ParameterizedTypeReference<List<Bar>>() {
-				}).getBody().iterator().next().getName()).isEqualTo("host=localhost;foo");
+				}).getBody().iterator().next().getName())
+						.isEqualTo("host=localhost:" + port + ";foo");
 	}
 
 	@Test
 	public void bodyless() throws Exception {
 		assertThat(rest.postForObject("/proxy/0", Collections.singletonMap("name", "foo"),
-				Bar.class).getName()).isEqualTo("host=localhost;foo");
+				Bar.class).getName()).isEqualTo("host=localhost:" + port + ";foo");
 	}
 
 	@Test
@@ -207,7 +209,8 @@ public class ProductionConfigurationTests {
 								.expand("/proxy/entity"))
 						.body(Collections.singletonMap("name", "foo")),
 				new ParameterizedTypeReference<List<Bar>>() {
-				}).getBody().iterator().next().getName()).isEqualTo("host=localhost;foo");
+				}).getBody().iterator().next().getName())
+						.isEqualTo("host=localhost:" + port + ";foo");
 	}
 
 	@Test
@@ -218,21 +221,22 @@ public class ProductionConfigurationTests {
 								.expand("/proxy/type"))
 						.body(Collections.singletonMap("name", "foo")),
 				new ParameterizedTypeReference<List<Bar>>() {
-				}).getBody().iterator().next().getName()).isEqualTo("host=localhost;foo");
+				}).getBody().iterator().next().getName())
+						.isEqualTo("host=localhost:" + port + ";foo");
 	}
 
 	@Test
 	public void single() throws Exception {
 		assertThat(rest.postForObject("/proxy/single",
 				Collections.singletonMap("name", "foobar"), Bar.class).getName())
-						.isEqualTo("host=localhost;foobar");
+						.isEqualTo("host=localhost:" + port + ";foobar");
 	}
 
 	@Test
 	public void converter() throws Exception {
 		assertThat(rest.postForObject("/proxy/converter",
 				Collections.singletonMap("name", "foobar"), Bar.class).getName())
-						.isEqualTo("host=localhost;foobar");
+						.isEqualTo("host=localhost:" + port + ";foobar");
 	}
 
 	@Test
@@ -244,15 +248,35 @@ public class ProductionConfigurationTests {
 	@Test
 	@SuppressWarnings({ "Duplicates", "unchecked" })
 	public void headers() throws Exception {
-		Map<String, List<String>> headers = rest.exchange(RequestEntity
-				.get(rest.getRestTemplate().getUriTemplateHandler()
-						.expand("/proxy/headers"))
-				.header("foo", "bar").header("abc", "xyz").build(), Map.class).getBody();
+		Map<String, List<String>> headers = rest
+				.exchange(
+						RequestEntity
+								.get(rest.getRestTemplate().getUriTemplateHandler()
+										.expand("/proxy/headers"))
+								.header("foo", "bar").header("abc", "xyz")
+								.header("baz", "fob").build(),
+						Map.class)
+				.getBody();
 		assertThat(headers).doesNotContainKey("foo").doesNotContainKey("hello")
 				.containsKeys("bar", "abc");
 
 		assertThat(headers.get("bar")).containsOnly("hello");
 		assertThat(headers.get("abc")).containsOnly("123");
+		assertThat(headers.get("baz")).containsOnly("fob");
+	}
+
+	@Test
+	public void forwardedHeaderUsesHost() throws Exception {
+		Map<String, List<String>> headers = rest
+				.exchange(RequestEntity
+						.get(rest.getRestTemplate().getUriTemplateHandler()
+								.expand("/proxy/headers"))
+						.header("host", "foo:1234").build(), Map.class)
+				.getBody();
+
+		assertThat(headers).containsKey("forwarded");
+		assertThat(headers.get("forwarded").size()).isEqualTo(1);
+		assertThat(headers.get("forwarded").get(0)).isEqualTo("host=localhost:" + port);
 	}
 
 	@SpringBootApplication

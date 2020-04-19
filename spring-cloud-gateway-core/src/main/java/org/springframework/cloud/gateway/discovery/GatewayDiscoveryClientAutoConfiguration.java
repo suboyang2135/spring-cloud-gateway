@@ -24,7 +24,6 @@ import org.springframework.boot.autoconfigure.AutoConfigureBefore;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.cloud.client.discovery.DiscoveryClient;
 import org.springframework.cloud.client.discovery.ReactiveDiscoveryClient;
 import org.springframework.cloud.client.discovery.composite.CompositeDiscoveryClientAutoConfiguration;
 import org.springframework.cloud.gateway.config.GatewayAutoConfiguration;
@@ -45,7 +44,7 @@ import static org.springframework.cloud.gateway.support.NameUtils.normalizeRoute
 /**
  * @author Spencer Gibb
  */
-@Configuration
+@Configuration(proxyBeanMethods = false)
 @ConditionalOnProperty(name = "spring.cloud.gateway.enabled", matchIfMissing = true)
 @AutoConfigureBefore(GatewayAutoConfiguration.class)
 @AutoConfigureAfter(CompositeDiscoveryClientAutoConfiguration.class)
@@ -88,7 +87,7 @@ public class GatewayDiscoveryClientAutoConfiguration {
 		return properties;
 	}
 
-	@Configuration
+	@Configuration(proxyBeanMethods = false)
 	@ConditionalOnProperty(value = "spring.cloud.discovery.reactive.enabled",
 			matchIfMissing = true)
 	public static class ReactiveDiscoveryClientRouteDefinitionLocatorConfiguration {
@@ -98,24 +97,6 @@ public class GatewayDiscoveryClientAutoConfiguration {
 		public DiscoveryClientRouteDefinitionLocator discoveryClientRouteDefinitionLocator(
 				ReactiveDiscoveryClient discoveryClient,
 				DiscoveryLocatorProperties properties) {
-			return new DiscoveryClientRouteDefinitionLocator(discoveryClient, properties);
-		}
-
-	}
-
-	/**
-	 * @deprecated In favor of the native reactive service discovery capability.
-	 */
-	@Configuration
-	@Deprecated
-	@ConditionalOnProperty(value = "spring.cloud.discovery.reactive.enabled",
-			havingValue = "false")
-	public static class BlockingDiscoveryClientRouteDefinitionLocatorConfiguration {
-
-		@Bean
-		@ConditionalOnProperty(name = "spring.cloud.gateway.discovery.locator.enabled")
-		public DiscoveryClientRouteDefinitionLocator discoveryClientRouteDefinitionLocator(
-				DiscoveryClient discoveryClient, DiscoveryLocatorProperties properties) {
 			return new DiscoveryClientRouteDefinitionLocator(discoveryClient, properties);
 		}
 

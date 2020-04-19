@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2019 the original author or authors.
+ * Copyright 2013-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,8 @@ package org.springframework.cloud.gateway.config;
 
 import java.security.cert.X509Certificate;
 import java.util.List;
+import java.util.Set;
 
-import com.netflix.hystrix.HystrixObservableCommand;
 import io.netty.channel.ChannelOption;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
@@ -29,7 +29,6 @@ import reactor.core.publisher.Flux;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
 import reactor.netty.tcp.ProxyProvider;
-import rx.RxReactiveStreams;
 
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -66,9 +65,7 @@ import org.springframework.cloud.gateway.filter.factory.AddRequestHeaderGatewayF
 import org.springframework.cloud.gateway.filter.factory.AddRequestParameterGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.AddResponseHeaderGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.DedupeResponseHeaderGatewayFilterFactory;
-import org.springframework.cloud.gateway.filter.factory.FallbackHeadersGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.GatewayFilterFactory;
-import org.springframework.cloud.gateway.filter.factory.HystrixGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.MapRequestHeaderGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.PrefixPathGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.PreserveHostHeaderGatewayFilterFactory;
@@ -92,6 +89,9 @@ import org.springframework.cloud.gateway.filter.factory.SetRequestHeaderGatewayF
 import org.springframework.cloud.gateway.filter.factory.SetResponseHeaderGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.SetStatusGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.StripPrefixGatewayFilterFactory;
+import org.springframework.cloud.gateway.filter.factory.rewrite.GzipMessageBodyResolver;
+import org.springframework.cloud.gateway.filter.factory.rewrite.MessageBodyDecoder;
+import org.springframework.cloud.gateway.filter.factory.rewrite.MessageBodyEncoder;
 import org.springframework.cloud.gateway.filter.factory.rewrite.ModifyRequestBodyGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.rewrite.ModifyResponseBodyGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.headers.ForwardedHeadersFilter;
@@ -137,28 +137,34 @@ import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.context.annotation.Primary;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
 import org.springframework.core.convert.ConversionService;
 import org.springframework.core.env.Environment;
+import org.springframework.http.codec.ServerCodecConfigurer;
+import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.validation.Validator;
 import org.springframework.web.reactive.DispatcherHandler;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
 import org.springframework.web.reactive.socket.client.WebSocketClient;
+import org.springframework.web.reactive.socket.server.RequestUpgradeStrategy;
 import org.springframework.web.reactive.socket.server.WebSocketService;
 import org.springframework.web.reactive.socket.server.support.HandshakeWebSocketService;
+import org.springframework.web.reactive.socket.server.upgrade.ReactorNettyRequestUpgradeStrategy;
 
 import static org.springframework.cloud.gateway.config.HttpClientProperties.Pool.PoolType.DISABLED;
 import static org.springframework.cloud.gateway.config.HttpClientProperties.Pool.PoolType.FIXED;
 
 /**
  * @author Spencer Gibb
+ * @author Ziemowit Stolarczyk
  */
-@Configuration
+@Configuration(proxyBeanMethods = false)
 @ConditionalOnProperty(name = "spring.cloud.gateway.enabled", matchIfMissing = true)
 @EnableConfigurationProperties
 @AutoConfigureBefore({ HttpHandlerAutoConfiguration.class,
 		WebFluxAutoConfiguration.class })
-@AutoConfigureAfter({ GatewayLoadBalancerClientAutoConfiguration.class,
+@AutoConfigureAfter({ GatewayReactiveLoadBalancerClientAutoConfiguration.class,
 		GatewayClassPathWarningAutoConfiguration.class })
 @ConditionalOnClass(DispatcherHandler.class)
 public class GatewayAutoConfiguration {
@@ -197,8 +203,8 @@ public class GatewayAutoConfiguration {
 
 	@Bean
 	public ConfigurationService gatewayConfigurationService(BeanFactory beanFactory,
-			@Qualifier("webFluxConversionService") ConversionService conversionService,
-			Validator validator) {
+			@Qualifier("webFluxConversionService") ObjectProvider<ConversionService> conversionService,
+			ObjectProvider<Validator> validator) {
 		return new ConfigurationService(beanFactory, conversionService, validator);
 	}
 
@@ -214,6 +220,7 @@ public class GatewayAutoConfiguration {
 
 	@Bean
 	@Primary
+	@ConditionalOnMissingBean(name = "cachedCompositeRouteLocator")
 	// TODO: property to disable composite?
 	public RouteLocator cachedCompositeRouteLocator(List<RouteLocator> routeLocators) {
 		return new CachingRouteLocator(
@@ -306,8 +313,9 @@ public class GatewayAutoConfiguration {
 	}
 
 	@Bean
-	public WebSocketService webSocketService() {
-		return new HandshakeWebSocketService();
+	public WebSocketService webSocketService(
+			RequestUpgradeStrategy requestUpgradeStrategy) {
+		return new HandshakeWebSocketService(requestUpgradeStrategy);
 	}
 
 	@Bean
@@ -325,11 +333,6 @@ public class GatewayAutoConfiguration {
 		return new WeightCalculatorWebFilter(routeLocator, configurationService);
 	}
 
-	@Bean
-	public AfterRoutePredicateFactory afterRoutePredicateFactory() {
-		return new AfterRoutePredicateFactory();
-	}
-
 	/*
 	 * @Bean //TODO: default over netty? configurable public WebClientHttpRoutingFilter
 	 * webClientHttpRoutingFilter() { //TODO: WebClient bean return new
@@ -340,6 +343,11 @@ public class GatewayAutoConfiguration {
 	 */
 
 	// Predicate Factory beans
+
+	@Bean
+	public AfterRoutePredicateFactory afterRoutePredicateFactory() {
+		return new AfterRoutePredicateFactory();
+	}
 
 	@Bean
 	public BeforeRoutePredicateFactory beforeRoutePredicateFactory() {
@@ -425,8 +433,9 @@ public class GatewayAutoConfiguration {
 	}
 
 	@Bean
-	public ModifyRequestBodyGatewayFilterFactory modifyRequestBodyGatewayFilterFactory() {
-		return new ModifyRequestBodyGatewayFilterFactory();
+	public ModifyRequestBodyGatewayFilterFactory modifyRequestBodyGatewayFilterFactory(
+			ServerCodecConfigurer codecConfigurer) {
+		return new ModifyRequestBodyGatewayFilterFactory(codecConfigurer.getReaders());
 	}
 
 	@Bean
@@ -435,8 +444,11 @@ public class GatewayAutoConfiguration {
 	}
 
 	@Bean
-	public ModifyResponseBodyGatewayFilterFactory modifyResponseBodyGatewayFilterFactory() {
-		return new ModifyResponseBodyGatewayFilterFactory();
+	public ModifyResponseBodyGatewayFilterFactory modifyResponseBodyGatewayFilterFactory(
+			ServerCodecConfigurer codecConfigurer, Set<MessageBodyDecoder> bodyDecoders,
+			Set<MessageBodyEncoder> bodyEncoders) {
+		return new ModifyResponseBodyGatewayFilterFactory(codecConfigurer.getReaders(),
+				bodyDecoders, bodyEncoders);
 	}
 
 	@Bean
@@ -554,7 +566,12 @@ public class GatewayAutoConfiguration {
 		return new RequestHeaderSizeGatewayFilterFactory();
 	}
 
-	@Configuration
+	@Bean
+	public GzipMessageBodyResolver gzipMessageBodyResolver() {
+		return new GzipMessageBodyResolver();
+	}
+
+	@Configuration(proxyBeanMethods = false)
 	@ConditionalOnClass(HttpClient.class)
 	protected static class NettyConfiguration {
 
@@ -575,7 +592,8 @@ public class GatewayAutoConfiguration {
 
 		@Bean
 		@ConditionalOnMissingBean
-		public HttpClient gatewayHttpClient(HttpClientProperties properties) {
+		public HttpClient gatewayHttpClient(HttpClientProperties properties,
+				List<HttpClientCustomizer> customizers) {
 
 			// configure pool resources
 			HttpClientProperties.Pool pool = properties.getPool();
@@ -586,14 +604,29 @@ public class GatewayAutoConfiguration {
 			}
 			else if (pool.getType() == FIXED) {
 				connectionProvider = ConnectionProvider.fixed(pool.getName(),
-						pool.getMaxConnections(), pool.getAcquireTimeout());
+						pool.getMaxConnections(), pool.getAcquireTimeout(),
+						pool.getMaxIdleTime(), pool.getMaxLifeTime());
 			}
 			else {
-				connectionProvider = ConnectionProvider.elastic(pool.getName());
+				connectionProvider = ConnectionProvider.elastic(pool.getName(),
+						pool.getMaxIdleTime(), pool.getMaxLifeTime());
 			}
 
 			HttpClient httpClient = HttpClient.create(connectionProvider)
-					.tcpConfiguration(tcpClient -> {
+					// TODO: move customizations to HttpClientCustomizers
+					.httpResponseDecoder(spec -> {
+						if (properties.getMaxHeaderSize() != null) {
+							// cast to int is ok, since @Max is Integer.MAX_VALUE
+							spec.maxHeaderSize(
+									(int) properties.getMaxHeaderSize().toBytes());
+						}
+						if (properties.getMaxInitialLineLength() != null) {
+							// cast to int is ok, since @Max is Integer.MAX_VALUE
+							spec.maxInitialLineLength(
+									(int) properties.getMaxInitialLineLength().toBytes());
+						}
+						return spec;
+					}).tcpConfiguration(tcpClient -> {
 
 						if (properties.getConnectTimeout() != null) {
 							tcpClient = tcpClient.option(
@@ -664,6 +697,13 @@ public class GatewayAutoConfiguration {
 				httpClient = httpClient.wiretap(true);
 			}
 
+			if (!CollectionUtils.isEmpty(customizers)) {
+				customizers.sort(AnnotationAwareOrderComparator.INSTANCE);
+				for (HttpClientCustomizer customizer : customizers) {
+					httpClient = customizer.customize(httpClient);
+				}
+			}
+
 			return httpClient;
 		}
 
@@ -694,29 +734,27 @@ public class GatewayAutoConfiguration {
 				webSocketClient.setMaxFramePayloadLength(
 						properties.getWebsocket().getMaxFramePayloadLength());
 			}
+			webSocketClient.setHandlePing(properties.getWebsocket().isProxyPing());
 			return webSocketClient;
 		}
 
-	}
-
-	@Configuration
-	@ConditionalOnClass({ HystrixObservableCommand.class, RxReactiveStreams.class })
-	protected static class HystrixConfiguration {
-
 		@Bean
-		public HystrixGatewayFilterFactory hystrixGatewayFilterFactory(
-				ObjectProvider<DispatcherHandler> dispatcherHandler) {
-			return new HystrixGatewayFilterFactory(dispatcherHandler);
-		}
+		public ReactorNettyRequestUpgradeStrategy reactorNettyRequestUpgradeStrategy(
+				HttpClientProperties httpClientProperties) {
+			ReactorNettyRequestUpgradeStrategy requestUpgradeStrategy = new ReactorNettyRequestUpgradeStrategy();
 
-		@Bean
-		public FallbackHeadersGatewayFilterFactory fallbackHeadersGatewayFilterFactory() {
-			return new FallbackHeadersGatewayFilterFactory();
+			HttpClientProperties.Websocket websocket = httpClientProperties
+					.getWebsocket();
+			PropertyMapper map = PropertyMapper.get();
+			map.from(websocket::getMaxFramePayloadLength).whenNonNull()
+					.to(requestUpgradeStrategy::setMaxFramePayloadLength);
+			map.from(websocket::isProxyPing).to(requestUpgradeStrategy::setHandlePing);
+			return requestUpgradeStrategy;
 		}
 
 	}
 
-	@Configuration
+	@Configuration(proxyBeanMethods = false)
 	@ConditionalOnClass(Health.class)
 	protected static class GatewayActuatorConfiguration {
 
